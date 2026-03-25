@@ -1,5 +1,5 @@
 use crate::profiles::SimProfile;
-use crate::state::{AppState, AwakeMode, SimulationState, TimerPreset};
+use crate::state::{AppState, AwakeMode, DriveAliveState, SimulationState, TimerPreset};
 use crate::stats::StatsTracker;
 use crate::timer;
 use std::sync::Arc;
@@ -118,6 +118,43 @@ fn build_menu(
     // ── Settings ────────────────────────────────────────────
     let keeping_display = mode == AwakeMode::DisplayAndSystem;
 
+    // ── Drive Alive submenu ────────────────────────────────
+    let active_drives: Vec<String> = state
+        .drive_alive
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|da| da.drives.clone())
+        .unwrap_or_default();
+
+    let available_drives = crate::drive_alive::list_drives();
+    let mut drive_sub = SubmenuBuilder::with_id(app, "drive_alive_sub", "Drive Alive");
+
+    if available_drives.is_empty() {
+        drive_sub = drive_sub.item(
+            &MenuItemBuilder::with_id("da_none", "No external drives found")
+                .enabled(false)
+                .build(app)?,
+        );
+    } else {
+        for drive in &available_drives {
+            let name = drive
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            let id = format!("da_drive_{}", name);
+            let is_active = active_drives.contains(&name);
+            drive_sub = drive_sub.item(
+                &CheckMenuItemBuilder::with_id(id, &name)
+                    .checked(is_active)
+                    .build(app)?,
+            );
+        }
+    }
+
+    let drive_alive_menu = drive_sub.build()?;
+
     let settings = SubmenuBuilder::with_id(app, "settings_submenu", "Settings")
         .item(
             &CheckMenuItemBuilder::with_id("qs_keep_display", "Keep display awake")
@@ -137,6 +174,7 @@ fn build_menu(
                 .checked(sim_active)
                 .build(app)?,
         )
+        .item(&drive_alive_menu)
         .build()?;
 
     // ── Stats ───────────────────────────────────────────────
@@ -194,6 +232,7 @@ fn handle_menu_event(app: &AppHandle, state: &Arc<AppState>, stats: &Arc<StatsTr
     match id {
         "end_session" => {
             stop_simulation(state);
+            stop_drive_alive(state);
             stats.end_session();
             let _ = crate::clamshell::disable(); // Re-enable normal sleep
             let _ = crate::awake::deactivate(state);
@@ -202,6 +241,7 @@ fn handle_menu_event(app: &AppHandle, state: &Arc<AppState>, stats: &Arc<StatsTr
 
         "quit" => {
             stop_simulation(state);
+            stop_drive_alive(state);
             stats.end_session();
             let _ = crate::clamshell::disable(); // Re-enable normal sleep
             let _ = crate::awake::deactivate(state);
@@ -251,6 +291,13 @@ fn handle_menu_event(app: &AppHandle, state: &Arc<AppState>, stats: &Arc<StatsTr
             } else {
                 start_simulation(state, &SimProfile::Slack); // Generic jiggle
             }
+            let _ = update_tray(app, state);
+        }
+
+        // Drive Alive toggle
+        id if id.starts_with("da_drive_") => {
+            let drive_name = id.strip_prefix("da_drive_").unwrap().to_string();
+            toggle_drive_alive(state, &drive_name);
             let _ = update_tray(app, state);
         }
 
@@ -307,6 +354,47 @@ fn stop_simulation(state: &Arc<AppState>) {
     let mut sim = state.simulation.lock().unwrap();
     if let Some(s) = sim.take() {
         s.cancel.cancel();
+    }
+}
+
+fn toggle_drive_alive(state: &Arc<AppState>, drive_name: &str) {
+    let mut da = state.drive_alive.lock().unwrap();
+    let mut drives: Vec<String> = da.as_ref().map(|d| d.drives.clone()).unwrap_or_default();
+
+    if drives.contains(&drive_name.to_string()) {
+        drives.retain(|d| d != drive_name);
+    } else {
+        drives.push(drive_name.to_string());
+    }
+
+    // Cancel existing task
+    if let Some(old) = da.take() {
+        old.cancel.cancel();
+    }
+
+    if drives.is_empty() {
+        // No drives selected, leave state as None
+        return;
+    }
+
+    // Start new task with updated drive list
+    let cancel = CancellationToken::new();
+    let paths: Vec<std::path::PathBuf> = drives
+        .iter()
+        .map(|name| std::path::PathBuf::from(format!("/Volumes/{}", name)))
+        .collect();
+    crate::drive_alive::start(paths, cancel.clone());
+
+    *da = Some(DriveAliveState {
+        cancel,
+        drives,
+    });
+}
+
+fn stop_drive_alive(state: &Arc<AppState>) {
+    let mut da = state.drive_alive.lock().unwrap();
+    if let Some(old) = da.take() {
+        old.cancel.cancel();
     }
 }
 

@@ -2,6 +2,7 @@ mod awake;
 mod battery_monitor;
 #[cfg(target_os = "macos")]
 mod clamshell;
+mod drive_alive;
 mod process_monitor;
 mod profiles;
 mod simulation;
@@ -13,6 +14,17 @@ mod tray;
 use state::AppState;
 use stats::StatsTracker;
 use std::sync::Arc;
+use tauri_plugin_updater::UpdaterExt;
+
+async fn check_for_update(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+    let update = app.updater()?.check().await?;
+    if let Some(update) = update {
+        eprintln!("Update available: v{}", update.version);
+        update.download_and_install(|_, _| {}, || {}).await?;
+        eprintln!("Update installed — will apply on next launch");
+    }
+    Ok(())
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -24,6 +36,7 @@ pub fn run() {
             // Phase 4: handle CLI args forwarded from second instance
         }))
         .plugin(tauri_plugin_store::Builder::default().build())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .build(),
@@ -55,6 +68,17 @@ pub fn run() {
             {
                 app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             }
+
+            // Auto-updater: check in background, download and install silently
+            let update_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    if let Err(e) = check_for_update(&update_handle).await {
+                        eprintln!("Update check failed: {e}");
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(30 * 60)).await;
+                }
+            });
 
             Ok(())
         })

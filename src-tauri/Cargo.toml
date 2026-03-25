@@ -34,3 +34,7 @@ battery = "0.7"
 tauri-plugin-cli = "2"
 tauri-plugin-autostart = "2"
 chrono = "0.4"
+
+# Auto-updater
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"

@@ -20,3 +20,4 @@ src-tauri/gen/
 app-icon.png
 *.log
 .claude/
+src-tauri/keys/

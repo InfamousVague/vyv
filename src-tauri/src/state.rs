@@ -80,11 +80,17 @@ pub struct SimulationState {
     pub profile_name: String,
 }
 
+pub struct DriveAliveState {
+    pub cancel: CancellationToken,
+    pub drives: Vec<String>,
+}
+
 pub struct AppState {
     pub awake_mode: Mutex<AwakeMode>,
     pub timer: Mutex<Option<TimerState>>,
     pub awake_guard: Mutex<Option<keepawake::KeepAwake>>,
     pub simulation: Mutex<Option<SimulationState>>,
+    pub drive_alive: Mutex<Option<DriveAliveState>>,
 }
 
 impl AppState {
@@ -94,6 +100,7 @@ impl AppState {
             timer: Mutex::new(None),
             awake_guard: Mutex::new(None),
             simulation: Mutex::new(None),
+            drive_alive: Mutex::new(None),
         }
     }
 }
