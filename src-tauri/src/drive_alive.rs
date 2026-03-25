@@ -5,7 +5,9 @@ use tokio_util::sync::CancellationToken;
 const KEEPALIVE_FILE: &str = ".vyv_keepalive";
 const PING_INTERVAL_SECS: u64 = 60;
 
-/// List mounted external volumes (macOS: everything in /Volumes except the boot volume).
+/// List mounted volumes suitable for Drive Alive.
+/// Includes the internal boot volume and real external drives.
+/// Excludes DMG disk images and system volumes.
 pub fn list_drives() -> Vec<PathBuf> {
     let volumes = Path::new("/Volumes");
     let mut drives = Vec::new();
@@ -13,13 +15,28 @@ pub fn list_drives() -> Vec<PathBuf> {
     if let Ok(entries) = std::fs::read_dir(volumes) {
         for entry in entries.flatten() {
             let path = entry.path();
-            // Skip the boot volume (symlink target of /)
-            if is_boot_volume(&path) {
+            let name = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+
+            // Skip hidden directories and DMG temp mounts (dmg.XXXXXX pattern)
+            if name.starts_with('.') || name.starts_with("dmg.") {
                 continue;
             }
-            if path.is_dir() {
-                drives.push(path);
+
+            // Must be a directory (or symlink to one, like "Macintosh HD" -> /)
+            if !path.is_dir() {
+                continue;
             }
+
+            // Use diskutil to confirm it's not a disk image
+            if is_dmg_mount(&path) {
+                continue;
+            }
+
+            drives.push(path);
         }
     }
 
@@ -69,11 +86,16 @@ fn cleanup_drive(drive: &Path) {
     let _ = std::fs::remove_file(file_path);
 }
 
-/// Check whether a volume path is the macOS boot volume.
-fn is_boot_volume(path: &Path) -> bool {
-    // On macOS, "/" is the boot volume. /Volumes contains a symlink to it.
-    match std::fs::read_link(path) {
-        Ok(target) => target == Path::new("/"),
+/// Check whether a volume is a mounted DMG (disk image).
+fn is_dmg_mount(path: &Path) -> bool {
+    let output = std::process::Command::new("diskutil")
+        .args(["info", &path.to_string_lossy()])
+        .output();
+    match output {
+        Ok(out) => {
+            let info = String::from_utf8_lossy(&out.stdout);
+            info.contains("Disk Image")
+        }
         Err(_) => false,
     }
 }

@@ -51,48 +51,91 @@ fn build_menu(
 ) -> Result<tauri::menu::Menu<tauri::Wry>, Box<dyn std::error::Error>> {
     let mode = *state.awake_mode.lock().unwrap();
     let guard_held = state.awake_guard.lock().unwrap().is_some();
-    let is_active = guard_held; // Session is active only if keepawake guard is held
+    let is_active = guard_held;
     let remaining = timer::remaining_secs(state);
     let sim_active = state.simulation.lock().unwrap().is_some();
-    let sim_profile_name = state
-        .simulation
+    let keeping_display = mode == AwakeMode::DisplayAndSystem;
+    let clamshell_on = crate::clamshell::is_enabled();
+
+    let active_drives: Vec<String> = state
+        .drive_alive
         .lock()
         .unwrap()
         .as_ref()
-        .map(|s| s.profile_name.clone());
+        .map(|da| da.drives.clone())
+        .unwrap_or_default();
+    let has_active_drives = !active_drives.is_empty();
 
-    // ── Status line ─────────────────────────────────────────
-    let status_text = if is_active {
-        let mode_str = match mode {
-            AwakeMode::DisplayAndSystem => "Display + System",
-            AwakeMode::SystemOnly => "System Only",
-            AwakeMode::Off => unreachable!(),
-        };
-        let time = remaining
-            .map(timer::format_remaining)
-            .unwrap_or_else(|| "Indefinite".into());
-        format!("Vyv: {} — {}", mode_str, time)
-    } else {
-        "Vyv: Off".to_string()
-    };
-    let status = MenuItemBuilder::with_id("status", &status_text)
-        .enabled(false)
-        .build(app)?;
-
-    // ── Start/End Session ───────────────────────────────────
-    let mut menu_builder = MenuBuilder::new(app).item(&status).separator();
+    // ── Session Summary ──────────────────────────────────────
+    let mut menu_builder = MenuBuilder::new(app);
 
     if is_active {
-        menu_builder = menu_builder
-            .item(&MenuItemBuilder::with_id("end_session", "End Session").build(app)?);
-    } else {
-        menu_builder = menu_builder
-            .item(
-                &MenuItemBuilder::with_id("start_header", "Start New Session:")
+        // Duration line
+        let time_str = remaining
+            .map(timer::format_remaining)
+            .unwrap_or_else(|| "Indefinitely".into());
+        menu_builder = menu_builder.item(
+            &MenuItemBuilder::with_id("sum_duration", format!("⏱  {}", time_str))
+                .enabled(false)
+                .build(app)?,
+        );
+
+        // Display mode line
+        let display_str = if keeping_display {
+            "🖥  Display stays on"
+        } else {
+            "💤  Display may sleep"
+        };
+        menu_builder = menu_builder.item(
+            &MenuItemBuilder::with_id("sum_display", display_str)
+                .enabled(false)
+                .build(app)?,
+        );
+
+        // Clamshell line (only if enabled)
+        if clamshell_on {
+            menu_builder = menu_builder.item(
+                &MenuItemBuilder::with_id("sum_clamshell", "📱  Lid close won't sleep")
                     .enabled(false)
                     .build(app)?,
-            )
-            .item(&MenuItemBuilder::with_id("timer_indefinite", "  Indefinitely").build(app)?);
+            );
+        }
+
+        // Jiggle line (only if enabled)
+        if sim_active {
+            menu_builder = menu_builder.item(
+                &MenuItemBuilder::with_id("sum_jiggle", "🖱  Mouse jiggle active")
+                    .enabled(false)
+                    .build(app)?,
+            );
+        }
+
+        // Drive alive summary (only if drives active)
+        if has_active_drives {
+            let drives_str = active_drives.join(", ");
+            menu_builder = menu_builder.item(
+                &MenuItemBuilder::with_id("sum_drives", format!("💾  Keeping alive: {}", drives_str))
+                    .enabled(false)
+                    .build(app)?,
+            );
+        }
+
+        menu_builder = menu_builder
+            .separator()
+            .item(&MenuItemBuilder::with_id("end_session", "End Session").build(app)?);
+    } else {
+        menu_builder = menu_builder.item(
+            &MenuItemBuilder::with_id("status", "Vyv: Off")
+                .enabled(false)
+                .build(app)?,
+        );
+
+        menu_builder = menu_builder.separator().item(
+            &MenuItemBuilder::with_id("start_header", "Start New Session:")
+                .enabled(false)
+                .build(app)?,
+        )
+        .item(&MenuItemBuilder::with_id("timer_indefinite", "  Indefinitely").build(app)?);
 
         let minutes_sub = SubmenuBuilder::with_id(app, "minutes_sub", "  Minutes")
             .item(&MenuItemBuilder::with_id("timer_min5", "5 Minutes").build(app)?)
@@ -112,27 +155,13 @@ fn build_menu(
         menu_builder = menu_builder.item(&hours_sub);
     }
 
-    // ── Settings ── (built below, but we need sim state for it)
-    let _ = sim_profile_name; // suppress warning
-
-    // ── Settings ────────────────────────────────────────────
-    let keeping_display = mode == AwakeMode::DisplayAndSystem;
-
-    // ── Drive Alive submenu ────────────────────────────────
-    let active_drives: Vec<String> = state
-        .drive_alive
-        .lock()
-        .unwrap()
-        .as_ref()
-        .map(|da| da.drives.clone())
-        .unwrap_or_default();
-
+    // ── Drive Alive (top-level flyout) ─────────────────────
     let available_drives = crate::drive_alive::list_drives();
     let mut drive_sub = SubmenuBuilder::with_id(app, "drive_alive_sub", "Drive Alive");
 
     if available_drives.is_empty() {
         drive_sub = drive_sub.item(
-            &MenuItemBuilder::with_id("da_none", "No external drives found")
+            &MenuItemBuilder::with_id("da_none", "No drives found")
                 .enabled(false)
                 .build(app)?,
         );
@@ -144,17 +173,19 @@ fn build_menu(
                 .to_string_lossy()
                 .to_string();
             let id = format!("da_drive_{}", name);
-            let is_active = active_drives.contains(&name);
+            let is_alive = active_drives.contains(&name);
             drive_sub = drive_sub.item(
                 &CheckMenuItemBuilder::with_id(id, &name)
-                    .checked(is_active)
+                    .checked(is_alive)
                     .build(app)?,
             );
         }
     }
 
     let drive_alive_menu = drive_sub.build()?;
+    menu_builder = menu_builder.separator().item(&drive_alive_menu);
 
+    // ── Settings ─────────────────────────────────────────────
     let settings = SubmenuBuilder::with_id(app, "settings_submenu", "Settings")
         .item(
             &CheckMenuItemBuilder::with_id("qs_keep_display", "Keep display awake")
@@ -166,7 +197,7 @@ fn build_menu(
                 "qs_prevent_clamshell",
                 "Prevent sleep when lid closed",
             )
-            .checked(crate::clamshell::is_enabled())
+            .checked(clamshell_on)
             .build(app)?,
         )
         .item(
@@ -174,10 +205,9 @@ fn build_menu(
                 .checked(sim_active)
                 .build(app)?,
         )
-        .item(&drive_alive_menu)
         .build()?;
 
-    // ── Stats ───────────────────────────────────────────────
+    // ── Stats & Quit ─────────────────────────────────────────
     let total_time = stats.format_total();
     let dosage = stats.get_dosage_level();
 
