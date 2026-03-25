@@ -1,0 +1,11 @@
+{
+  "identifier": "default",
+  "description": "Default capability for Vyv",
+  "windows": ["*"],
+  "permissions": [
+    "core:default",
+    "store:default",
+    "core:event:default",
+    "global-shortcut:default"
+  ]
+}
